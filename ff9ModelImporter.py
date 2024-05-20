@@ -6,7 +6,7 @@ bl_info = {
     "location": "File > Import > FF9 model (ff9.img)",
     "description": 'Import models from FF9',
     "warning": "",
-    "wiki_url": "https://github.com/Chevluh/",
+    "wiki_url": "https://github.com/Chevluh/FF9_Blender_Importer/",
     "category": "Import-Export"
 }
 
