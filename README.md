@@ -8,7 +8,7 @@ This add-on can import animated and weapon models used in the PS1 version of FF9
 
 All animations are imported together as a single action, and the scene's end frame will be adjusted to match the end of the action.
 
-Support for overworld and field characters is only partial and a work in progress. Those are imported without textures (although the raw texture pages will still import as unlinked images), all the models in a given file will be imported in one go, and each model is matched with all compatible animations.
+Support for overworld and field characters is only partial and a work in progress. All the models in a given file will be imported in one go, and each model is matched with all compatible animations.
 
 Additionally, texture animation is not supported for any model.
 
