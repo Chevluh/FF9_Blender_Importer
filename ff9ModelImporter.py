@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Import Final Fantasy 9 models",
     "author": "Chev",
-    "version": (0,1),
+    "version": (0,2),
     "blender": (4,0,0),
     "location": "File > Import > FF9 model (ff9.img)",
     "description": 'Import models from FF9',
@@ -65,6 +65,11 @@ COLOR_RGB_24BPP=3
 
 MIN_BONE_LENGTH = 0.1
 
+RECT_X = 0
+RECT_Y = 1
+RECT_WIDTH = 2
+RECT_HEIGHT = 3
+
 # https://docs.python.org/3/library/struct.html
 # < little endian, i integer. B would be unsigned char (ie ubyte in c#), ? would be C99 1-byte bool
 
@@ -89,11 +94,79 @@ def readUBytes(file_object, count):
         xs.append(readUByte(file_object))
     return xs
 
+def readUInt24(file_object):
+    byte0 = readUByte(file_object)
+    byte1 = readUByte(file_object)
+    byte2 = readUByte(file_object)
+    return byte0 * 65536 + byte1 * 256 + byte2
+
+
+#### material data
+
+def readMats(header, file_object):
+    mats =[]
+    for i, pointer in enumerate(header["objectPointers"]):
+        file_object.seek(pointer)
+        mats.append(readModelMaterials(file_object))
+    return mats
+
+def readModelMaterials(file_object):
+    tag = readUByte(file_object) #always DC
+    modelCount = readUByte(file_object)
+    padding = readUInt16(file_object)
+
+    print("model material data count:", modelCount)
+    models = []
+    for i in range(0, modelCount):
+        startposition = file_object.tell()
+        info = dict()
+        info["mesh_id"] = readUInt16(file_object)               # 0x02 file id - mesh
+        info["default_animation_id"] = readUInt16(file_object)  # 0x03 file id - animation ( this value can be -1, it means that there is no default animation )
+        temp = readUInt32(file_object)
+        info["materials_count"] = temp >> 24 #readUByte(file_object)        # materials count
+        info["materials_pointer"] = startposition + (temp & 0xFFFFFF) #readUInt24(file_object)     # pointer to materials array ( calculated from begining of structure )
+        info["id_0x19"] = readUInt16(file_object)               # 0x19 file id - ??? ( can be -1 )
+        info["unknown1"] = readUByte(file_object)               # possibly id of some file
+        info["unknown2"] = readUByte(file_object)               # unknown ( align to 32 bits? )
+        models.append(info)
+    for info in models:
+        file_object.seek(info["materials_pointer"])
+        materials = []
+        for i in range (0, info["materials_count"]):
+            material = dict()
+            material["tpage"], material["texMode"], material["blendMode"] = decodeTPage(readUInt16(file_object))
+            material["clut"] = decodeCLUT(readUInt16(file_object))
+            materials.append(material)
+        for material in materials:
+            material["textureWindow"] = (readInt16(file_object), readInt16(file_object))
+        for material in materials:
+            material["faceEyePositions"] = ((readInt16(file_object), readInt16(file_object)),(readInt16(file_object), readInt16(file_object)))
+        info["materials"] = materials
+    return models
+
+def decodeTPage(tpage):
+    x = tpage & 0b1111
+    y = (tpage >>4) & 1
+    texmode = (tpage >> 7) & 0b11
+    blendMode = (tpage >> 5) & 0b11
+    return (x * 64,y * 256), texmode, blendMode
+
+def decodeCLUT(clut):
+    x = clut & 0b111111
+    y = (clut >>6) & 0b11111111
+    return (x * 16, y)
+# def decodeWindow(value): #https://psx-spx.consoledev.net/graphicsprocessingunitgpu/#gpu-other-commands
+#     maskX =  (value & 0b11111) * 8
+#     maskY =  ((value >>5) & 0b11111) * 8
+#     offsetX =  ((value >>10) & 0b11111) * 8
+#     offsetY =  ((value >>15) & 0b11111) * 8
+#     return (offsetX, offsetY)
+
 
 #### mesh data
 
 def readMesh(file_object, group):
-    polygons, maxIndex, maxUVIndex, maxMaterialIndex = readPolygons(file_object, group)
+    polygons, maxIndex, maxUVIndex = readPolygons(file_object, group)
     vertices = readVertices(file_object, maxIndex+1, group)
     UVs = readUVs(file_object, maxUVIndex+1, group)
     return polygons, vertices, UVs
@@ -101,7 +174,6 @@ def readMesh(file_object, group):
 def readPolygons(file_object, group):
     maxIndex = 0
     maxUVIndex = 0
-    maxMaterialIndex = 0
     file_object.seek(group["polygonDataPointer"])
     AQuads = []
     for i in range(0, group["typeAQuadrangleCount"]):
@@ -114,7 +186,6 @@ def readPolygons(file_object, group):
         file_object.seek(4, 1)
         maxIndex = max(maxIndex, max(quad["vertices"]))
         maxUVIndex = max(maxUVIndex, max(quad["UV"]))
-        maxMaterialIndex = max(maxMaterialIndex, quad["material"]) 
     ATris = []
     for i in range(0, group["typeATriangleCount"]):
         tri = dict()
@@ -128,7 +199,6 @@ def readPolygons(file_object, group):
         ATris.append(tri)
         maxIndex = max(maxIndex, max(tri["vertices"]))
         maxUVIndex = max(maxUVIndex, max(tri["UV"]))
-        maxMaterialIndex = max(maxMaterialIndex, tri["material"]) 
     BQuads = []
     for i in range(0, group["typeBQuadrangleCount"]):
         quad = dict()
@@ -164,7 +234,7 @@ def readPolygons(file_object, group):
     polygons["BTris"] = BTris
     polygons["CQuads"] = CQuads
     polygons["CTris"] = CTris
-    return polygons, maxIndex, maxUVIndex, maxMaterialIndex
+    return polygons, maxIndex, maxUVIndex
 
 def readVertices(file_object, count, group):
     file_object.seek(group["VertexDataPointer"])
@@ -185,7 +255,7 @@ def readUVs(file_object, count, group):
         UVs.append(UV)
     return UVs
 
-def readModel(file_object, materials, isWeaponDir): #uvOffsets):
+def readModel(file_object, materials, chosenDirectory): #uvOffsets):
     startAddress = file_object.tell() #filePointer["address"]
     #file_object.seek(startAddress)
     zeroes = readUInt16(file_object)
@@ -239,7 +309,7 @@ def readModel(file_object, materials, isWeaponDir): #uvOffsets):
     groupLengths = dict()
     for i, group in enumerate(groups):
         polygons, vertices, UVs = readMesh(file_object, group)
-        buildMesh(polygons, vertices, UVs, armature, f'mesh {i}', materials, isWeaponDir)#uvOffsets)
+        buildMesh(polygons, vertices, UVs, armature, f'mesh {i}', materials, chosenDirectory)#uvOffsets)
         getGroupLengths(groupLengths, vertices)
     adjustBoneLengths(armature, groupLengths)
     poseArmature(armature, bones)
@@ -299,13 +369,14 @@ def adjustBoneLengths(armatureObject, lengths):
             bone.tail[2] = max(bone.tail[2], lengths[boneIndex])
     bpy.ops.object.mode_set(mode = 'OBJECT')
 
-def buildMesh(polygons, vertices, UVs, armature, objectName, materials, isWeaponDir): #:uvOffsets):
-    if isWeaponDir:
+def buildMesh(polygons, vertices, UVs, armature, objectName, materials, chosenDirectory): #:uvOffsets):
+    if chosenDirectory == 8:
         offset = -16
     else:
         offset = 0
     positions = []
     faces = []
+
     for vertex in vertices:
         positions.append(vertex["position"])
     for polygon in polygons["AQuads"]:
@@ -323,7 +394,12 @@ def buildMesh(polygons, vertices, UVs, armature, objectName, materials, isWeapon
 
     mesh = bpy.data.meshes.new(objectName)
     mesh.from_pydata(positions, [], faces)#faces) #(x y z) vertices, (1 2) edges, (variable index count) faces 
+
+    #TODO: if directory is 3 or 4, iterate through all UVs for each material and find min/max UVs, then crop the material's texture image (to closest multiple of 8)
+
     if materials is not None:
+
+        #then resize UVs
         textureDimensions =[]
         for material in materials:
             image = material.node_tree.nodes["Image Texture"].image
@@ -525,15 +601,46 @@ def toSignedInt16(value):
 
 def readTextures(textureHeader, file_object):
     materials = []
-    uvOffsets = []
     for i, pointer in enumerate(textureHeader["objectPointers"]):
         file_object.seek(pointer)
-        texture, offset = readTIMTexture(file_object, f'image {i}')
+        texture = timToImage(readTIMTexture(file_object), f'image {i}')
         materials.append(makeMaterial(texture))
-        uvOffsets.append(offset)
-    return materials, uvOffsets
+    return materials
 
-def readTIMTexture(file_object, textureName):
+def readTexturesEx(textureHeader, matInfo, file_object):
+    #matinfo has an entry for each model
+    #each model has x materials
+    #so there's one more level than I think
+    allMaterials = dict()
+    tims = []
+    for i, pointer in enumerate(textureHeader["objectPointers"]):
+        file_object.seek(pointer)
+        tims.append(readTIMTexture(file_object))
+    for modelInfo in matInfo:
+        materials =[]
+        for i, texInfo in enumerate(modelInfo["materials"]):
+            print("texinfo: ", texInfo)
+            #iterate through tims to find the ones containing texture and clut
+            for tim in tims:
+                if (texInfo["tpage"][0] >= tim["TextureRect"][0]
+                and texInfo["tpage"][0] < tim["TextureRect"][0] + tim["TextureRect"][2]
+                and texInfo["tpage"][1] >= tim["TextureRect"][1]
+                and texInfo["tpage"][1] < tim["TextureRect"][1] + tim["TextureRect"][3]):
+                    tpage = tim
+                    break
+            for tim in tims:
+                if (texInfo["clut"][0] >= tim["TextureRect"][0]
+                and texInfo["clut"][0] < tim["TextureRect"][0] + tim["TextureRect"][2]
+                and texInfo["clut"][1] >= tim["TextureRect"][1]
+                and texInfo["clut"][1] < tim["TextureRect"][1] + tim["TextureRect"][3]):
+                    clut = tim
+                    break
+            texture = timToImageEx(tpage, clut, texInfo, f'model {modelInfo["mesh_id"]} image {i}')
+            materials.append(makeMaterial(texture))
+        allMaterials[modelInfo["mesh_id"]] =materials
+    return allMaterials #this one will be a dict of list, because it has to handle several models
+
+def readTIMTexture(file_object):
     #read header
     start = startAddress = file_object.tell()
     TIMtag = readUByte(file_object)
@@ -545,6 +652,8 @@ def readTIMTexture(file_object, textureName):
     colorformat = flags & 3
     ColorTablePresent = (flags & 8) != 0
 
+    TIM = dict()
+    TIM["format"] = colorformat
     #read palettes
     if ColorTablePresent:
         colorTableLength = readUInt32(file_object)
@@ -556,46 +665,117 @@ def readTIMTexture(file_object, textureName):
         colorTable = []
         for i in range(0, tablelength):
             colorTable.append(UInt16ToRGBA(readUInt16(file_object)))
-    
+        print("colorTableX:" , colorTableX)
+        print("colorTableY:" , colorTableY)
+        print("colorTableWidth:" , colorTableWidth)
+        print("colorTableHeight:" , colorTableHeight)
+        TIM["ColorTableRect"] = (colorTableX, colorTableY, colorTableWidth, colorTableHeight)
+        TIM["ColorTable"] = colorTable
     #read texture data
     textureLength = readUInt32(file_object)
     textureX = readUInt16(file_object)
     textureY = readUInt16(file_object)
     textureWordWidth = readUInt16(file_object)
     textureHeight = readUInt16(file_object)
-    if colorformat == COLOR_PALETTED_4BPP:
-        imageData = Read4bppImage(file_object)
-    elif colorformat == COLOR_PALETTED_8BPP:
-        textureWidth = textureWordWidth*2
-        imageData = Read8bppImage(file_object, textureWidth * textureHeight, colorTable)
-    elif colorformat == COLOR_RGBA_16BPP:
-        textureWidth = textureWordWidth
-        imageData = Read16bppImage(file_object, textureWidth * textureHeight)
-    else: #elif colorformat == COLOR_RGB_24BPP:
-        imageData = Read24bppImage(file_object)
+    
+    print("textureX:" , textureX)
+    print("textureY:" , textureY)
+    print("textureWordWidth:" , textureWordWidth)
+    print("textureHeight:" , textureHeight)
+    print("")
+    TIM["TextureRect"] = (textureX, textureY, textureWordWidth, textureHeight)
 
-    image = bpy.data.images.new(textureName, textureWidth, textureHeight, alpha = True)
+    #read array of Uint16
+    data = []
+    for i in range (0, textureWordWidth * textureHeight):
+        data.append(readUInt16(file_object))
+    TIM["TextureData"] = data
+    return TIM
+
+def timToImage(TIM, textureName):
+    if TIM["format"] == COLOR_PALETTED_4BPP:
+        textureWidth = TIM["TextureRect"][RECT_WIDTH]*4
+        imageData = Read4bppImage(TIM["TextureData"])
+    elif TIM["format"] == COLOR_PALETTED_8BPP:
+        textureWidth = TIM["TextureRect"][RECT_WIDTH]*2
+        imageData = Read8bppImage(TIM["TextureData"], TIM["ColorTable"])
+    elif TIM["format"] == COLOR_RGBA_16BPP:
+        textureWidth = TIM["TextureRect"][RECT_WIDTH]
+        imageData = Read16bppImage(TIM["TextureData"])
+    else: #elif TIM["format"] == COLOR_RGB_24BPP:
+        imageData = Read24bppImage(TIM["TextureData"])
+
+    image = bpy.data.images.new(textureName, textureWidth, TIM["TextureRect"][RECT_HEIGHT], alpha = True)
     image.pixels = imageData
     image.file_format = 'PNG'
     image.pack()
-    return image, textureY % textureHeight
+    return image
 
-def Read4bppImage(file_object):
+def timToImageEx(tim, clut, info, textureName):
+
+    #build palette
+    #clut is a full tim image, need to get the raw palette line from it
+    if info["texMode"] == COLOR_PALETTED_4BPP:
+        clutLength = 16
+    else:
+        clutLength = 256
+    print(clut)
+    palette = []
+    clutorigin =  (info["clut"][1] -clut["TextureRect"][RECT_Y]) * clut["TextureRect"][RECT_WIDTH] + info["clut"][0] -clut["TextureRect"][RECT_X]
+    for i in range(clutLength):
+        palette.append(UInt16ToRGBA(clut["TextureData"][clutorigin +i]))
+
+    pageWidth = tim["TextureRect"][RECT_WIDTH] #<< info["texMode"] # this is how far from tpage start we're allowed to look ahead horizontally. Always 256 vertically
+    pageHeight = tim["TextureRect"][RECT_HEIGHT] #256
+
+    x = info["textureWindow"][0]
+    x = (x  >> (2-info["texMode"])) + info["tpage"][0] - tim["TextureRect"][0] #now in vram size, from start of tpage
+
+    y = info["textureWindow"][1] + info["tpage"][1] - tim["TextureRect"][1]
+
+    imagePixels =[]
+    print (pageWidth, pageHeight)
+    print (pageWidth * pageHeight, len(tim["TextureData"]))
+    print(info)
+    for pixelY in range (0, pageHeight):
+        for pixelX in range(0, pageWidth):
+            pixel = tim["TextureData"][((pageHeight + pixelY+y)%pageHeight) * tim["TextureRect"][RECT_WIDTH] + ((pageWidth+ pixelX+x)%pageWidth)]
+            if info["texMode"] == COLOR_PALETTED_4BPP:
+                imagePixels.extend(palette[pixel & 0xF])
+                imagePixels.extend(palette[(pixel >> 4) & 0xF])
+                imagePixels.extend(palette[(pixel >> 8) & 0xF])
+                imagePixels.extend(palette[(pixel >> 12) & 0xF])
+            elif info["texMode"] == COLOR_PALETTED_8BPP:
+                imagePixels.extend(palette[pixel & 0xFF])
+                imagePixels.extend(palette[(pixel >> 8) & 0xFF])
+            elif info["texMode"] == COLOR_RGBA_16BPP:
+                imagePixels.extend(UInt16ToRGBA(pixel))
+            else:
+                raise Exception("invalid color format")
+
+    image = bpy.data.images.new(textureName, pageWidth * (1 << (2-info["texMode"])), pageHeight, alpha = True)
+    image.pixels = imagePixels
+    image.file_format = 'PNG'
+    image.pack()
+    return image
+
+def Read4bppImage(data):
     raise Exception("not implemented")
 
-def Read8bppImage(file_object, pixelCount, palette):
+def Read8bppImage(data, palette):
     result = []
-    for pixel in range(pixelCount):
-        result.extend(palette[readUByte(file_object)])
+    for pixel in data:
+        result.extend(palette[pixel & 0xFF])
+        result.extend(palette[(pixel >> 8) & 0xFF])
     return result
 
-def Read16bppImage(file_object, pixelCount):
+def Read16bppImage(data):
     result = []
-    for pixel in range(pixelCount):
-        result.extend(UInt16ToRGBA(readUInt16(file_object)))
+    for pixel in data:
+        result.extend(UInt16ToRGBA(pixel))
     return result
 
-def Read24bppImage(file_object):
+def Read24bppImage(data):
     raise Exception("not implemented")   
             
 
@@ -761,24 +941,39 @@ def ImportModel(archiveFile, chosenDirectory = None, chosenModel = None):
             ##model file index should be chosen at this stage at the latest
             modelFile = modelfiles[chosenModel]
 
+            matFiles = []
+            if chosenDirectory == 3 or chosenDirectory == 4:
+                collectFiles([modelFile["parent"]], FILETYPE_CLUT_AND_TPAGES_FOR_MODEL, matFiles)
+            else:
+                collectFiles([modelFile["parent"]["parent"]], FILETYPE_CLUT_AND_TPAGES_FOR_MODEL, matFiles)
+            print("model material files count:",len(matFiles))
+            if len(matFiles) > 0:
+                matHeader = readFileHeader(matFiles[0], file_object)
+                matInfo = readMats(matHeader, file_object)
+                for mat in matInfo:
+                    print(mat)
+
             textureFiles = []
             collectFiles([modelFile["parent"]["parent"]], FILETYPE_TIM_IMAGE, textureFiles)
             print("texture files count:",len(textureFiles))
 
             if len(textureFiles) > 0:
                 textureHeader = readFileHeader(textureFiles[0], file_object)
-                materials, uvOffsets = readTextures(textureHeader, file_object)
+                if chosenDirectory == 3 or chosenDirectory == 4:
+                    allMaterials = readTexturesEx(textureHeader, matInfo[0], file_object) #this one will be a dict of list, because it has to handle several models
+                else:
+                    materials = readTextures(textureHeader, file_object)
             else:
                 materials = None
 
             fileHeader = readFileHeader(modelFile, file_object)
 
             sceneAnimEnd = -1
-            for pointer in fileHeader["objectPointers"]:
+            for i, pointer in enumerate(fileHeader["objectPointers"]):
                 file_object.seek(pointer) #should become a foreach?
                 if chosenDirectory == 4 or chosenDirectory == 3:
-                    materials = None
-                armature = readModel(file_object, materials, chosenDirectory == 8)
+                    materials = allMaterials[fileHeader["objectIdentifiers"][i]]
+                armature = readModel(file_object, materials, chosenDirectory)
 
                 animationFiles =[]
                 collectFiles([modelFile["parent"]], FILETYPE_ANIM, animationFiles)
